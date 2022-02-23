@@ -8,6 +8,7 @@ use storage::file_manager::page::Block;
 
 pub const BLOCK_SIZE: usize = 4096; // page size in bytes; 
 pub const DB_DIR: &str = "rustub_db"; // project directory; 
+pub const EXTENT_SIZE: usize = 1000; 
 
 fn main() -> Result<(),Error> {
     let mut db_path = dirs::home_dir().unwrap();

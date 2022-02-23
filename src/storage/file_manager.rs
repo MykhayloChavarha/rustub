@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::fs::{self, OpenOptions,File};
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::os::unix::prelude::FileExt;
 use std::path::PathBuf;
 use std::str::FromStr; 
 use dirs::home_dir;
@@ -10,14 +11,14 @@ use std::error::Error;
 
 pub mod page; 
 
-use crate::{BLOCK_SIZE};
+use crate::{BLOCK_SIZE, EXTENT_SIZE};
 
 use page::{Page, Block};
 
 /// Module file manager. 
 /// It is responsible for writing page buffers to disk. 
 /// 
-// we need to have a list of files 
+///
 pub struct FileManager {
     files: HashMap<String,File>,
     db_dir_path: PathBuf
@@ -26,14 +27,11 @@ pub struct FileManager {
 /// File manager 
 impl FileManager {
     /// Creates a new instance of a File Manager. 
-    pub fn new(db_dir_path: PathBuf, capacity: usize) -> Result<FileManager, FileManagerError> {
-        // let mut db_dir = env::current_dir()?;
-        // let mut db_dir = home_dir();
-        // db_dir.push(PARENT_DIR);
-        // db_dir.push(db_name.to_string());
 
-        // let db_dir_path = db_dir.as_path();
-        if !db_dir_path.exists() {
+    pub fn new(db_dir_path: PathBuf, capacity: usize) -> Result<FileManager, FileManagerError> {
+
+        let path_exist = db_dir_path.exists();
+        if !path_exist {
             fs::create_dir(db_dir_path.clone())?;
         }
 
@@ -57,6 +55,7 @@ impl FileManager {
         }
 
         let new_file = File::create(file_path)?;
+        new_file.sync_all()?;
         drop(new_file);
 
         Ok(())
@@ -102,7 +101,10 @@ impl FileManager {
         file_path.push(file_name);
 
         match self.files.remove(file_name) {
-            Some(file) => {drop(file); Ok(())},
+            Some(file) => {
+                drop(file); 
+                Ok(())
+            },
             None => Err(FileManagerError::FileNotFound)
         }   
     }
@@ -125,6 +127,7 @@ impl FileManager {
         match self.files.get_mut(&block.file_name) {
             Some(file) => {
                 let offset = (BLOCK_SIZE as u64)*(block.block_number as u64);
+                //todo: validate block; 
                 file.seek(SeekFrom::Start(offset))?;
                 file.write(&mut page.page_buffer)?;
                 file.sync_all()?;
@@ -135,20 +138,19 @@ impl FileManager {
     }
 
     /// extends the hard drive space for new pages; 
-    pub fn allocate(&mut self, file: &str, num_pages: usize) -> Result<(), FileManagerError> {
+    pub fn allocate(&mut self, file_name: &str) -> Result<(), FileManagerError> {
         // let maybe_file = self.iles.get_mut(table_id);
 
-        // if let Some(file) = maybe_file {
-        //     let metadata = file.metadata()?;
-        //     let size = metadata.len();
-        //     file.set_len(size+(BLOCK_SIZE as u64)*1000)?; // magic number
-        //     file.sync_all()?;
-        //     return Ok(());
-        // }
-
-        // Err(Error::from(NotFound))
-
-        Ok(())
+        match self.files.get_mut(file_name) {
+            Some(file) => {
+                let end = file.seek(SeekFrom::End(0))?;
+                let chunk = (EXTENT_SIZE as u64)*(BLOCK_SIZE as u64);
+                file.set_len(end + chunk)?;
+                file.sync_all()?;
+                Ok(())
+            },
+            None => Err(FileManagerError::FileNotFound),
+        }
     }
 }
 
@@ -189,22 +191,93 @@ impl From<io::Error> for FileManagerError {
 
 #[cfg(test)]
 mod tests {
+    use crate::DB_DIR;
+
     use super::*; 
     use fs::remove_dir;
+    use anyhow::Error;
+
+    #[test]
+    fn should_create_db_folder_if_none_exist() -> Result<(), Error> {
+        let mut db_path = home_dir().unwrap();
+        db_path.push(DB_DIR);
+        db_path.push("test_db");
+        assert_eq!(db_path.exists(),false);
+        FileManager::new(db_path.clone(),10)?;
+        assert_eq!(db_path.exists(),true);
+        fs::remove_dir(db_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn should_create_db_folder_if_one_exists() -> Result<(), Error> {
+        let mut db_path = home_dir().unwrap();
+        db_path.push(DB_DIR);
+        db_path.push("test_db");
+        fs::create_dir(db_path.clone())?;
+        assert_eq!(db_path.exists(),true);
+        FileManager::new(db_path.clone(),10)?;
+        assert_eq!(db_path.exists(),true);
+        fs::remove_dir(db_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn should_create_and_delete_files() -> Result<(), Error> {
+        let mut db_path = home_dir().unwrap();
+        db_path.push(DB_DIR);
+        db_path.push("test_db");
+        let mut fm = FileManager::new(db_path.clone(),10)?;
+        fm.create("file1")?;
+        fm.create("file2")?;
+        let mut path_with_file1 = db_path.clone();
+        path_with_file1.push("file1");
+        let mut path_with_file2 = db_path.clone();
+        path_with_file2.push("file2");
+        // check if both file exist. 
+        assert_eq!(path_with_file1.exists(),true);
+        assert_eq!(path_with_file2.exists(),true);
+        // delete files from the database 
+        fm.delete("file1")?;
+        fm.delete("file2")?;
+        assert_eq!(path_with_file1.exists(),false);
+        assert_eq!(path_with_file2.exists(),false);
+        fs::remove_dir(db_path)?;
+        Ok(())
+    }
 
     // #[test]
-    // fn create_db_dir() -> Result<(),Error> {
-    //     let db_name = "test_db";
-    //     let capacity = 2; 
-    //     let mut db_dir = env::current_dir()?;
-    //     db_dir.push(PARENT_DIR);
-    //     db_dir.push(db_name);
-    //     FileManager::new(db_name,capacity)?;
-    //     let db_path = db_dir.as_path();
-    //     assert_eq!(db_path.exists(),true);
-    //     remove_dir(db_path)?;
-    //     assert_ne!(db_path.exists(),true);
-    //     Ok(())
+    // fn should_create_db_folder_if_none_exist_v2() {
+    //     println!("Running Test #2");
+    //     let db_path = get_new_db_path("test_db");
+    //     debug_assert_eq!(db_path.exists(),false);
+    //     let mut fm = FileManager::new(db_path.clone(),10);
+    //     match fm {
+    //         Ok(fm) => {
+    //             match fs::remove_dir(db_path.clone()) {
+    //                 Ok(_) => assert!(true),
+    //                 Err(_) => {println!("Error occured during dir removal");assert!(false)}
+    //             }
+    //         },
+    //         Err(e) => {println!("Error occured during file_manager {}", e);assert!(false);},
+    //     }
+    // }
+
+    // #[test]
+    // fn should_create_db_folder_if_none_exist_ver2() {
+    //     println!("Running Test #2");
+    //     let db_path = get_new_db_path("test_db");
+    //     debug_assert_eq!(db_path.clone().exists(),false);
+    //     let mut fm = FileManager::new(db_path.clone(),10);
+    //     match fm {
+    //         Ok(fm) => {
+    //             match fs::remove_dir(db_path.clone()) {
+    //                 Ok(_) => assert!(true),
+    //                 Err(_) => {println!("Error occured during dir removal");assert!(false)}
+    //             }
+    //         },
+    //         Err(_) => {println!("Error occured during file_manager");assert!(false);},
+    //     }
     // }
     // fn create_new_file() -> Result<(), Error> {
     //     let db_path = env::current_dir()?;
